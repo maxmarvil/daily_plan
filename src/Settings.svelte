@@ -1,16 +1,15 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import Database from "@tauri-apps/plugin-sql";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { invoke } from "@tauri-apps/api/core";
-  import { emit } from "@tauri-apps/api/event";
+  import { getDb } from "./lib/db";
   import {
     DEFAULT_SHORTCUT,
     comboFromEvent,
     formatCombo,
   } from "./lib/shortcut";
 
-  let db: Database | null = $state(null);
+  let db = $state<Awaited<ReturnType<typeof getDb>> | null>(null);
   let shortcut = $state("");
   let recording = $state(false);
   let status = $state("");
@@ -33,7 +32,6 @@
       await persist(combo);
       status = `Сохранено: ${formatCombo(combo)}`;
       statusKind = "ok";
-      emit("settings-changed");
     } catch (e) {
       status = String(e);
       statusKind = "err";
@@ -60,7 +58,7 @@
 
   onMount(async () => {
     shortcut = await invoke<string>("get_shortcut");
-    db = await Database.load("sqlite:daily-plan.db");
+    db = await getDb();
   });
 </script>
 

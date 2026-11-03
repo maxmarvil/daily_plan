@@ -1,19 +1,19 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import Database from "@tauri-apps/plugin-sql";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { emit } from "@tauri-apps/api/event";
+  import { getDb } from "./lib/db";
   import { dayLabel } from "./lib/dates";
 
   type Task = { id: number; day: string; text: string; source_id: number | null };
   type Comment = { id: number; text: string; created_at: string };
 
-  const label = getCurrentWindow().label; // "task-{id}"
+  const label = getCurrentWindow().label;
   const windowTaskId = Number(label.slice("task-".length));
 
-  let db: Database | null = $state(null);
-  // показываем всегда оригинал: ссылка-перенос резолвится в source_id
+  let db = $state<Awaited<ReturnType<typeof getDb>> | null>(null);
   let task = $state<Task | null>(null);
+  let originalMissing = $state(false);
   let comments = $state<Comment[]>([]);
   let draft = $state("");
 
@@ -29,7 +29,13 @@
         `SELECT id, day, text, source_id FROM tasks WHERE id = $1`,
         [t.source_id],
       );
-      t = rows[0] ?? t;
+      if (!rows[0]) {
+        originalMissing = true;
+        task = null;
+        comments = [];
+        return;
+      }
+      t = rows[0];
     }
     task = t;
     comments = t
@@ -81,7 +87,7 @@
   }
 
   onMount(() => {
-    Database.load("sqlite:daily-plan.db").then(async (loaded) => {
+    getDb().then(async (loaded) => {
       db = loaded;
       await loadAll();
     });
@@ -91,7 +97,9 @@
 <svelte:window onkeydown={onWindowKeydown} />
 
 <main class="viewer">
-  {#if task}
+  {#if originalMissing}
+    <p class="none">Оригинал задачи не найден</p>
+  {:else if task}
     <header class="head">
       <div class="date">{dayLabel(task.day)}</div>
     </header>
@@ -113,15 +121,17 @@
     <p class="none">Задача не найдена</p>
   {/if}
 
-  <footer class="composer">
-    <textarea
-      use:focus
-      rows="2"
-      placeholder="Комментарий… (Enter — отправить, Shift+Enter — перенос)"
-      bind:value={draft}
-      onkeydown={onDraftKeydown}
-    ></textarea>
-  </footer>
+  {#if task}
+    <footer class="composer">
+      <textarea
+        use:focus
+        rows="2"
+        placeholder="Комментарий… (Enter — отправить, Shift+Enter — перенос)"
+        bind:value={draft}
+        onkeydown={onDraftKeydown}
+      ></textarea>
+    </footer>
+  {/if}
 </main>
 
 <style>
@@ -174,6 +184,7 @@
     font-size: 11px;
     color: var(--muted);
     margin-bottom: 2px;
+    user-select: none;
   }
 
   .body {

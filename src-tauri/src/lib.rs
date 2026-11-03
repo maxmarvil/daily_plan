@@ -1,5 +1,5 @@
 use std::sync::Mutex;
-use tauri::{AppHandle, Manager, State, WebviewWindow};
+use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 use tauri_plugin_global_shortcut::{
     Builder as ShortcutBuilder, GlobalShortcutExt, ShortcutState,
 };
@@ -70,7 +70,7 @@ fn migrations() -> Vec<Migration> {
         .collect()
 }
 
-fn toggle_capture_window(win: &WebviewWindow) {
+fn toggle_capture_window(app: &AppHandle, win: &WebviewWindow) {
     let visible = win.is_visible().unwrap_or(false);
     let focused = win.is_focused().unwrap_or(false);
 
@@ -79,6 +79,7 @@ fn toggle_capture_window(win: &WebviewWindow) {
     } else {
         let _ = win.show();
         let _ = win.set_focus();
+        let _ = app.emit("capture-shown", ());
     }
 }
 
@@ -99,19 +100,26 @@ fn open_settings(app: tauri::AppHandle) -> tauri::Result<()> {
     .title("Настройки")
     .inner_size(520.0, 600.0)
     .min_inner_size(420.0, 420.0)
+    .always_on_top(true)
     .center()
     .build()?;
     win.set_focus()?;
     Ok(())
 }
 
-fn current_shortcut(app: &AppHandle) -> String {
-    app.state::<ActiveShortcut>().0.lock().unwrap().clone()
+fn current_shortcut(app: &AppHandle) -> Result<String, String> {
+    app.state::<ActiveShortcut>()
+        .0
+        .lock()
+        .map(|s| s.clone())
+        .map_err(|_| "shortcut state poisoned".to_string())
 }
 
 #[tauri::command]
-fn get_shortcut(state: State<'_, ActiveShortcut>) -> String {
-    state.0.lock().unwrap().clone()
+fn get_shortcut(state: State<'_, ActiveShortcut>) -> Result<String, String> {
+    state.0.lock().map(|s| s.clone()).map_err(|_| {
+        "shortcut state poisoned".to_string()
+    })
 }
 
 /// Меняет глобальную комбинацию: сначала регистрируем новую, и только
@@ -123,7 +131,7 @@ fn set_shortcut(app: AppHandle, shortcut: String) -> Result<String, String> {
         return Err("Комбинация пуста".into());
     }
 
-    let current = current_shortcut(&app);
+    let current = current_shortcut(&app)?;
     if current == new {
         return Ok(new);
     }
@@ -132,8 +140,19 @@ fn set_shortcut(app: AppHandle, shortcut: String) -> Result<String, String> {
         .register(new.as_str())
         .map_err(|e| format!("Не удалось зарегистрировать «{new}»: {e}"))?;
 
-    let _ = app.global_shortcut().unregister(current.as_str());
-    *app.state::<ActiveShortcut>().0.lock().unwrap() = new.clone();
+    // Если снять старый не удалось — откатываем новый, чтобы не остаться
+    // с двумя рабочими комбинациями и рассинхроном state.
+    if let Err(e) = app.global_shortcut().unregister(current.as_str()) {
+        let _ = app.global_shortcut().unregister(new.as_str());
+        return Err(format!(
+            "Новая комбинация зарегистрирована, но не удалось снять старую «{current}»: {e}"
+        ));
+    }
+
+    *app.state::<ActiveShortcut>()
+        .0
+        .lock()
+        .map_err(|_| "shortcut state poisoned")? = new.clone();
     Ok(new)
 }
 
@@ -154,6 +173,7 @@ fn open_calendar(app: tauri::AppHandle) -> tauri::Result<()> {
     .title("Календарь")
     .inner_size(720.0, 760.0)
     .min_inner_size(560.0, 600.0)
+    .always_on_top(true)
     .center()
     .build()?;
     win.set_focus()?;
@@ -180,6 +200,7 @@ fn open_task_window(app: tauri::AppHandle, task_id: i64) -> tauri::Result<()> {
     .title("Задача")
     .inner_size(420.0, 560.0)
     .min_inner_size(320.0, 360.0)
+    .always_on_top(true)
     .build()?;
     win.set_focus()?;
     Ok(())
@@ -187,21 +208,18 @@ fn open_task_window(app: tauri::AppHandle, task_id: i64) -> tauri::Result<()> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    if let Err(e) = tauri::Builder::default()
         .plugin(
             SqlBuilder::default()
                 .add_migrations("sqlite:daily-plan.db", migrations())
                 .build(),
         )
-        .plugin(tauri_plugin_opener::init())
         .plugin(
             ShortcutBuilder::new()
                 .with_handler(|app, _shortcut, event| {
-                    // плагин используется только для вызова capture-окна,
-                    // поэтому реагируем на любое нажатие зарегистрированной combo
                     if event.state == ShortcutState::Pressed {
                         if let Some(win) = app.get_webview_window("main") {
-                            toggle_capture_window(&win);
+                            toggle_capture_window(app, &win);
                         }
                     }
                 })
@@ -220,6 +238,9 @@ pub fn run() {
                 .register(DEFAULT_SHORTCUT)
             {
                 eprintln!("не удалось зарегистрировать шорткат по умолчанию: {e}");
+                // fallback: показываем настройки, чтобы пользователь мог
+                // назначить другую комбинацию (главное окно стартует скрытым)
+                let _ = open_settings(app.handle().clone());
             }
             Ok(())
         })
@@ -231,5 +252,8 @@ pub fn run() {
             set_shortcut
         ])
         .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+    {
+        eprintln!("error while running tauri application: {e}");
+        std::process::exit(1);
+    }
 }

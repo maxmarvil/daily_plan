@@ -1,9 +1,9 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import Database from "@tauri-apps/plugin-sql";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
+  import { getDb } from "./lib/db";
   import {
     WEEKDAYS,
     MONTHS_RU,
@@ -29,7 +29,7 @@
     comments: number;
   };
 
-  let db: Database | null = $state(null);
+  let db = $state<Awaited<ReturnType<typeof getDb>> | null>(null);
   let mode: Mode = $state("year");
   let year: number = $state(new Date().getFullYear());
   let month: number = $state(new Date().getMonth());
@@ -45,7 +45,6 @@
     mode === "year" ? String(year) : `${cap(MONTHS_RU[month])} ${year}`,
   );
 
-  // 12 месячных сеток для режима «Год»
   const monthsGrid = $derived(
     Array.from({ length: 12 }, (_, m) => ({
       m,
@@ -53,7 +52,6 @@
     })),
   );
 
-  // задачи месяца, сгруппированные по дням (дни в обратном порядке)
   const daysGrouped = $derived.by(() => {
     const map = new Map<string, TaskRow[]>();
     for (const r of rows) {
@@ -64,8 +62,11 @@
     return [...map.entries()];
   });
 
+  // защита от stale-ответов при быстром переключении режимов/месяцев
+  let loadTicket = 0;
+
   function buildMonthCells(y: number, m: number): (string | null)[] {
-    const offset = (new Date(y, m, 1).getDay() + 6) % 7; // неделя с понедельника
+    const offset = (new Date(y, m, 1).getDay() + 6) % 7;
     const total = new Date(y, m + 1, 0).getDate();
     const cells: (string | null)[] = Array<string | null>(offset).fill(null);
     for (let d = 1; d <= total; d++) cells.push(dateStr(new Date(y, m, d)));
@@ -75,23 +76,32 @@
   function heat(day: string): string {
     const n = counts[day] ?? 0;
     if (!n) return "transparent";
-    const alpha = Math.round((0.14 + 0.86 * Math.min(1, n / Math.max(1, maxCount))) * 100);
+    const alpha = Math.round(
+      (0.14 + 0.86 * Math.min(1, n / Math.max(1, maxCount))) * 100,
+    );
     return `color-mix(in srgb, var(--accent) ${alpha}%, transparent)`;
   }
 
   async function loadYear() {
-    const r = await db!.select<CountRow[]>(
+    if (!db) return;
+    const myYear = year;
+    const ticket = ++loadTicket;
+    const r = await db.select<CountRow[]>(
       `SELECT day, COUNT(*) AS n FROM tasks
        WHERE substr(day, 1, 4) = $1
        GROUP BY day`,
-      [String(year)],
+      [String(myYear)],
     );
+    if (ticket !== loadTicket || mode !== "year" || year !== myYear) return;
     counts = Object.fromEntries(r.map((x) => [x.day, x.n]));
   }
 
   async function loadMonth() {
-    const [from, to] = monthBounds(year, month);
-    rows = await db!.select<TaskRow[]>(
+    if (!db) return;
+    const [myYear, myMonth] = [year, month];
+    const ticket = ++loadTicket;
+    const [from, to] = monthBounds(myYear, myMonth);
+    const result = await db.select<TaskRow[]>(
       `SELECT t.id, t.day, t.position, t.source_id, s.day AS source_day,
               CASE WHEN t.source_id IS NULL THEN t.text
                    ELSE substr(COALESCE(s.text, ''), 1, 40) END AS text,
@@ -106,11 +116,19 @@
        ORDER BY t.day DESC, t.position`,
       [from, to],
     );
+    if (
+      ticket !== loadTicket ||
+      mode !== "month" ||
+      year !== myYear ||
+      month !== myMonth
+    ) {
+      return;
+    }
+    rows = result;
   }
 
   $effect(() => {
     if (!db) return;
-    // читая state, эффект пересобирает данные при смене режима/периода
     if (mode === "year") void loadYear();
     else void loadMonth();
   });
@@ -131,7 +149,6 @@
     month = d.getMonth();
   }
 
-  /** день -> режим «Месяц» на этом месяце */
   function openDay(day: string) {
     const [y, m] = day.split("-").map(Number);
     year = y;
@@ -147,8 +164,6 @@
     if (t.source_id !== null && t.source_day) openDay(t.source_day);
     else openTaskWindow(t.id);
   }
-
-  // ——— перенос: выбор дня внутри текущего месяца ———
 
   const monthDays = $derived(
     Array.from(
@@ -168,24 +183,25 @@
     transferring = null;
     if (targetDay === src.day) return;
 
-    // дубль переноса той же задачи в тот же день
-    const dup = await db.select<{ id: number }[]>(
-      `SELECT id FROM tasks WHERE source_id = $1 AND day = $2 LIMIT 1`,
-      [src.id, targetDay],
-    );
-    if (dup.length > 0) return;
-
-    const pos = await db.select<{ p: number }[]>(
-      `SELECT COALESCE(MAX(position), 0) + 1 AS p FROM tasks WHERE day = $1`,
-      [targetDay],
-    );
-    const now = new Date().toISOString();
-    await db.execute(
-      `INSERT INTO tasks (day, position, text, source_id, created_at, updated_at)
-       VALUES ($1, $2, '', $3, $4, $5)`,
-      [targetDay, pos[0].p, src.id, now, now],
-    );
-    await loadMonth();
+    try {
+      const now = new Date().toISOString();
+      const rowsAffected = await db.execute(
+        `INSERT INTO tasks (day, position, text, source_id, created_at, updated_at)
+         SELECT $1,
+                (SELECT COALESCE(MAX(position), 0) + 1 FROM tasks WHERE day = $1),
+                '', $2, $3, $3
+         WHERE NOT EXISTS (
+           SELECT 1 FROM tasks WHERE source_id = $2 AND day = $1
+         )`,
+        [targetDay, src.id, now],
+      );
+      if (rowsAffected === 0) {
+        // дубль — молча игнорируем
+      }
+      await loadMonth();
+    } catch (e) {
+      console.error("Не удалось перенести задачу:", e);
+    }
   }
 
   function onWindowKeydown(e: KeyboardEvent) {
@@ -196,12 +212,11 @@
   }
 
   onMount(() => {
-    Database.load("sqlite:daily-plan.db").then(async (loaded) => {
+    getDb().then(async (loaded) => {
       db = loaded;
       await loadYear();
     });
 
-    // другие окна меняют данные — перечитываемся
     const un = listen("tasks-changed", () => {
       if (!db) return;
       if (mode === "year") void loadYear();
@@ -410,8 +425,6 @@
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
   }
 
-  /* ——— режим «Год» ——— */
-
   .year-grid {
     flex: 1;
     overflow-y: auto;
@@ -480,8 +493,6 @@
   .cell.has-tasks {
     font-weight: 600;
   }
-
-  /* ——— режим «Месяц» ——— */
 
   .month-list {
     flex: 1;

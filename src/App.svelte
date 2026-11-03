@@ -1,9 +1,9 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import Database from "@tauri-apps/plugin-sql";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { invoke } from "@tauri-apps/api/core";
-  import { emit } from "@tauri-apps/api/event";
+  import { emit, listen } from "@tauri-apps/api/event";
+  import { getDb } from "./lib/db";
   import { todayStr } from "./lib/dates";
 
   type Task = {
@@ -15,7 +15,7 @@
     source_id: number | null;
   };
 
-  let db: Database | null = $state(null);
+  let db = $state<Awaited<ReturnType<typeof getDb>> | null>(null);
   let tasks: Task[] = $state([]);
   let day = $state(todayStr());
 
@@ -48,17 +48,19 @@
       return;
     }
     try {
-      const rows = await db.select<{ max: number | null }[]>(
-        `SELECT MAX(position) AS max FROM tasks WHERE day = $1`,
-        [day],
-      );
-      const position = (rows[0]?.max ?? 0) + 1;
       const now = new Date().toISOString();
-      await db.execute(
+      const rowsAffected = await db.execute(
         `INSERT INTO tasks (day, position, text, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5)`,
-        [day, position, text, now, now],
+         SELECT $1,
+                (SELECT COALESCE(MAX(position), 0) + 1 FROM tasks WHERE day = $1),
+                $2, $3, $3`,
+        [day, text, now],
       );
+      if (rowsAffected === 0) {
+        // на всякий случай — не должно случиться при валидных данных
+        console.error("INSERT не вставил строку");
+        return;
+      }
       adding = false;
       draft = "";
       await refresh();
@@ -70,6 +72,11 @@
   }
 
   function startEdit(task: Task) {
+    // запись-перенос в текущем дне нельзя редактировать — открываем оригинал
+    if (task.is_transfer && task.source_id) {
+      invoke("open_task_window", { taskId: task.source_id });
+      return;
+    }
     editing = { id: task.id, text: task.text };
   }
 
@@ -107,8 +114,9 @@
     }
   }
 
-  async function applyStoredShortcut(loaded: Database) {
+  async function applyStoredShortcut() {
     try {
+      const loaded = await getDb();
       const stored = await loaded.select<{ value: string }[]>(
         `SELECT value FROM settings WHERE key = 'capture_shortcut'`,
       );
@@ -122,10 +130,15 @@
   }
 
   onMount(() => {
-    Database.load("sqlite:daily-plan.db").then(async (loaded) => {
+    getDb().then(async (loaded) => {
       db = loaded;
-      await applyStoredShortcut(loaded);
+      await applyStoredShortcut();
       await refresh();
+    });
+
+    // при вызове окна по горячей клавише сразу даём поле ввода
+    const unlisten = listen("capture-shown", () => {
+      adding = true;
     });
 
     // смена полуночи: если день изменился, переключаемся на новый
@@ -133,10 +146,17 @@
       const t = todayStr();
       if (t !== day) {
         day = t;
+        adding = false;
+        editing = null;
+        draft = "";
         refresh();
       }
     }, 30_000);
-    return () => clearInterval(timer);
+
+    return () => {
+      clearInterval(timer);
+      void unlisten.then((f) => f());
+    };
   });
 
   const dateLabel = $derived(
@@ -203,6 +223,7 @@
       {:else}
         <div
           class="task"
+          class:transfer={task.is_transfer}
           role="button"
           tabindex="0"
           onclick={() => startEdit(task)}
@@ -294,6 +315,10 @@
     padding: 7px 8px;
     border-radius: 8px;
     cursor: text;
+  }
+
+  .task.transfer {
+    background: color-mix(in srgb, var(--accent) 16%, var(--bg));
   }
 
   .task:hover {

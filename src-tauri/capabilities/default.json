@@ -1,12 +1,18 @@
 {
   "$schema": "https://schema.tauri.app/config/2/capability",
   "identifier": "default",
-  "description": "Основное окно quick-capture и окна просмотра задач",
+  "description": "Основное окно quick-capture, календарь, настройки и окна просмотра задач",
   "windows": ["main", "calendar", "settings", "task-*"],
   "permissions": [
     "core:default",
-    "opener:default",
+    "core:window:allow-hide",
+    "core:window:allow-show",
+    "core:window:allow-set-focus",
     "sql:default",
+    "sql:allow-load",
+    "sql:allow-execute",
+    "sql:allow-select",
+    "sql:allow-close",
     "global-shortcut:allow-register",
     "global-shortcut:allow-unregister"
   ]
