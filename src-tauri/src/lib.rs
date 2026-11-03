@@ -12,83 +12,62 @@ pub const DEFAULT_SHORTCUT: &str = "CmdOrCtrl+Shift+D";
 #[derive(Default)]
 struct ActiveShortcut(Mutex<String>);
 
-const MIGRATION_TASKS: &str = r#"
-CREATE TABLE IF NOT EXISTS tasks (
-  id          INTEGER PRIMARY KEY AUTOINCREMENT,
-  day         TEXT    NOT NULL,
-  position    INTEGER NOT NULL,
-  text        TEXT    NOT NULL DEFAULT '',
-  source_id   INTEGER REFERENCES tasks(id),
-  is_transfer INTEGER GENERATED ALWAYS AS (source_id IS NOT NULL) VIRTUAL,
-  created_at  TEXT    NOT NULL,
-  updated_at  TEXT    NOT NULL
-)"#;
+/// Миграции живут в `migrations/NNNN_name.up.sql` / `.down.sql`.
+/// tauri-plugin-sql выполняет только Up; down-скрипты использует
+/// `scripts/rollback.sh` для ручного отката (см. README).
+///
+/// Новая миграция: создать пару файлов, добавить строку в этот список.
+const MIGRATIONS: &[MigrationDef] = &[
+    (
+        1,
+        "create_tasks",
+        include_str!("../migrations/0001_create_tasks.up.sql"),
+        include_str!("../migrations/0001_create_tasks.down.sql"),
+    ),
+    (
+        2,
+        "tasks_indexes",
+        include_str!("../migrations/0002_tasks_indexes.up.sql"),
+        include_str!("../migrations/0002_tasks_indexes.down.sql"),
+    ),
+    (
+        3,
+        "create_comments",
+        include_str!("../migrations/0003_create_comments.up.sql"),
+        include_str!("../migrations/0003_create_comments.down.sql"),
+    ),
+    (
+        4,
+        "comments_index",
+        include_str!("../migrations/0004_comments_index.up.sql"),
+        include_str!("../migrations/0004_comments_index.down.sql"),
+    ),
+    (
+        5,
+        "transfer_unique",
+        include_str!("../migrations/0005_transfer_unique.up.sql"),
+        include_str!("../migrations/0005_transfer_unique.down.sql"),
+    ),
+    (
+        6,
+        "create_settings",
+        include_str!("../migrations/0006_create_settings.up.sql"),
+        include_str!("../migrations/0006_create_settings.down.sql"),
+    ),
+];
 
-const MIGRATION_TASKS_INDEXES: &str = r#"
-CREATE INDEX IF NOT EXISTS idx_tasks_day ON tasks(day, position);
-CREATE INDEX IF NOT EXISTS idx_tasks_source ON tasks(source_id)"#;
-
-const MIGRATION_COMMENTS: &str = r#"
-CREATE TABLE IF NOT EXISTS comments (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  task_id    INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-  text       TEXT    NOT NULL,
-  created_at TEXT    NOT NULL
-)"#;
-
-const MIGRATION_COMMENTS_INDEX: &str =
-  "CREATE INDEX IF NOT EXISTS idx_comments_task ON comments(task_id)";
-
-// одна и та же задача не может быть перенесена в один день дважды
-const MIGRATION_TRANSFER_UNIQUE: &str = r#"
-CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_transfer
-ON tasks(source_id, day) WHERE source_id IS NOT NULL"#;
-
-const MIGRATION_SETTINGS: &str = r#"
-CREATE TABLE IF NOT EXISTS settings (
-  key   TEXT PRIMARY KEY,
-  value TEXT NOT NULL
-)"#;
+type MigrationDef = (i64, &'static str, &'static str, &'static str);
 
 fn migrations() -> Vec<Migration> {
-    vec![
-        Migration {
-            version: 1,
-            description: "create_tasks",
-            sql: MIGRATION_TASKS,
+    MIGRATIONS
+        .iter()
+        .map(|(version, description, up, _down)| Migration {
+            version: *version,
+            description: (*description).into(),
+            sql: (*up).into(),
             kind: MigrationKind::Up,
-        },
-        Migration {
-            version: 2,
-            description: "tasks_indexes",
-            sql: MIGRATION_TASKS_INDEXES,
-            kind: MigrationKind::Up,
-        },
-        Migration {
-            version: 3,
-            description: "create_comments",
-            sql: MIGRATION_COMMENTS,
-            kind: MigrationKind::Up,
-        },
-        Migration {
-            version: 4,
-            description: "comments_index",
-            sql: MIGRATION_COMMENTS_INDEX,
-            kind: MigrationKind::Up,
-        },
-        Migration {
-            version: 5,
-            description: "transfer_unique",
-            sql: MIGRATION_TRANSFER_UNIQUE,
-            kind: MigrationKind::Up,
-        },
-        Migration {
-            version: 6,
-            description: "create_settings",
-            sql: MIGRATION_SETTINGS,
-            kind: MigrationKind::Up,
-        },
-    ]
+        })
+        .collect()
 }
 
 fn toggle_capture_window(win: &WebviewWindow) {

@@ -27,9 +27,25 @@ npm run tauri dev
 
 ## Структура
 
-- `src/` — Svelte-фронтенд (quick-capture).
-- `src-tauri/` — Rust: миграции SQLite, глобальный шорткат, политика окна.
-- БД: `daily-plan.db` в `app_data_dir`, схема — `CONCEPT.md` / `src-tauri/src/lib.rs`.
+- `src/` — Svelte-фронтенд (capture, календарь, просмотр задачи, настройки).
+- `src-tauri/` — Rust: миграции SQLite, глобальные шорткаты, политика окон.
+- `src-tauri/migrations/` — схема БД: пары `NNNN_name.up.sql` / `.down.sql`.
+- БД: `daily-plan.db` в `app_data_dir`, схема — `CONCEPT.md` / миграции.
+
+## Миграции
+
+`tauri-plugin-sql` выполняет только Up при старте приложения.
+
+Новая миграция: создать пару файлов `0007_name.up.sql` / `0007_name.down.sql`
+в `src-tauri/migrations/` и добавить строку в `MIGRATIONS` в
+`src-tauri/src/lib.rs` (up встраивается `include_str!`).
+
+Ручной откат down-скриптами (сначала делает backup БД):
+
+```bash
+scripts/rollback.sh 5        # откатить к версии 5
+DB_PATH=/tmp/test.db scripts/rollback.sh 0   # тест на копии
+```
 
 ## Сборка релиза
 
