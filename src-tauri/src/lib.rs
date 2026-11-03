@@ -32,6 +32,11 @@ CREATE TABLE IF NOT EXISTS comments (
 const MIGRATION_COMMENTS_INDEX: &str =
   "CREATE INDEX IF NOT EXISTS idx_comments_task ON comments(task_id)";
 
+// одна и та же задача не может быть перенесена в один день дважды
+const MIGRATION_TRANSFER_UNIQUE: &str = r#"
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_transfer
+ON tasks(source_id, day) WHERE source_id IS NOT NULL"#;
+
 fn migrations() -> Vec<Migration> {
     vec![
         Migration {
@@ -56,6 +61,12 @@ fn migrations() -> Vec<Migration> {
             version: 4,
             description: "comments_index",
             sql: MIGRATION_COMMENTS_INDEX,
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 5,
+            description: "transfer_unique",
+            sql: MIGRATION_TRANSFER_UNIQUE,
             kind: MigrationKind::Up,
         },
     ]
@@ -96,6 +107,31 @@ fn open_calendar(app: tauri::AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
+/// Окно просмотра задачи: текст + лента комментариев.
+/// Одно окно на задачу (label `task-{id}`), повторный вызов фокусирует его.
+#[tauri::command]
+fn open_task_window(app: tauri::AppHandle, task_id: i64) -> tauri::Result<()> {
+    let label = format!("task-{task_id}");
+
+    if let Some(win) = app.get_webview_window(&label) {
+        win.show()?;
+        win.set_focus()?;
+        return Ok(());
+    }
+
+    let win = tauri::WebviewWindowBuilder::new(
+        &app,
+        &label,
+        tauri::WebviewUrl::App("index.html".into()),
+    )
+    .title("Задача")
+    .inner_size(420.0, 560.0)
+    .min_inner_size(320.0, 360.0)
+    .build()?;
+    win.set_focus()?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let shortcuts =
@@ -130,7 +166,10 @@ pub fn run() {
             let _ = app;
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![open_calendar])
+        .invoke_handler(tauri::generate_handler![
+            open_calendar,
+            open_task_window
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

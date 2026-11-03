@@ -3,6 +3,7 @@
   import Database from "@tauri-apps/plugin-sql";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { invoke } from "@tauri-apps/api/core";
+  import { emit } from "@tauri-apps/api/event";
   import { todayStr } from "./lib/dates";
 
   type Task = {
@@ -61,6 +62,7 @@
       adding = false;
       draft = "";
       await refresh();
+      emit("tasks-changed");
     } catch (e) {
       // не теряем набранное: поле остаётся открытым
       console.error("Не удалось сохранить задачу:", e);
@@ -82,6 +84,7 @@
     }
     editing = null;
     await refresh();
+    emit("tasks-changed");
   }
 
   function onInputKeydown(e: KeyboardEvent, commit: () => void) {

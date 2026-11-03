@@ -2,6 +2,8 @@
   import { onMount } from "svelte";
   import Database from "@tauri-apps/plugin-sql";
   import { getCurrentWindow } from "@tauri-apps/api/window";
+  import { invoke } from "@tauri-apps/api/core";
+  import { listen } from "@tauri-apps/api/event";
   import {
     WEEKDAYS,
     MONTHS_RU,
@@ -24,6 +26,7 @@
     truncated: number;
     source_id: number | null;
     source_day: string | null;
+    comments: number;
   };
 
   let db: Database | null = $state(null);
@@ -32,6 +35,7 @@
   let month: number = $state(new Date().getMonth());
   let counts: Record<string, number> = $state({});
   let rows: TaskRow[] = $state([]);
+  let transferring: TaskRow | null = $state(null);
 
   const maxCount = $derived(
     Object.values(counts).reduce((a, b) => Math.max(a, b), 0),
@@ -93,7 +97,9 @@
                    ELSE substr(COALESCE(s.text, ''), 1, 40) END AS text,
               CASE WHEN t.source_id IS NOT NULL
                         AND length(COALESCE(s.text, '')) > 40
-                   THEN 1 ELSE 0 END AS truncated
+                   THEN 1 ELSE 0 END AS truncated,
+              (SELECT COUNT(*) FROM comments c
+                WHERE c.task_id = COALESCE(t.source_id, t.id)) AS comments
        FROM tasks t
        LEFT JOIN tasks s ON s.id = t.source_id
        WHERE t.day BETWEEN $1 AND $2
@@ -133,12 +139,75 @@
     mode = "month";
   }
 
+  function openTaskWindow(id: number) {
+    invoke("open_task_window", { taskId: id });
+  }
+
+  function onRowClick(t: TaskRow) {
+    if (t.source_id !== null && t.source_day) openDay(t.source_day);
+    else openTaskWindow(t.id);
+  }
+
+  // ——— перенос: выбор дня внутри текущего месяца ———
+
+  const monthDays = $derived(
+    Array.from(
+      { length: new Date(year, month + 1, 0).getDate() },
+      (_, i) => dateStr(new Date(year, month, i + 1)),
+    ),
+  );
+
+  function startTransfer(t: TaskRow, e: MouseEvent) {
+    e.stopPropagation();
+    transferring = transferring?.id === t.id ? null : t;
+  }
+
+  async function doTransfer(targetDay: string) {
+    if (!db || !transferring) return;
+    const src = transferring;
+    transferring = null;
+    if (targetDay === src.day) return;
+
+    // дубль переноса той же задачи в тот же день
+    const dup = await db.select<{ id: number }[]>(
+      `SELECT id FROM tasks WHERE source_id = $1 AND day = $2 LIMIT 1`,
+      [src.id, targetDay],
+    );
+    if (dup.length > 0) return;
+
+    const pos = await db.select<{ p: number }[]>(
+      `SELECT COALESCE(MAX(position), 0) + 1 AS p FROM tasks WHERE day = $1`,
+      [targetDay],
+    );
+    const now = new Date().toISOString();
+    await db.execute(
+      `INSERT INTO tasks (day, position, text, source_id, created_at, updated_at)
+       VALUES ($1, $2, '', $3, $4, $5)`,
+      [targetDay, pos[0].p, src.id, now, now],
+    );
+    await loadMonth();
+  }
+
   function onWindowKeydown(e: KeyboardEvent) {
-    if (e.key === "Escape") getCurrentWindow().hide();
+    if (e.key === "Escape") {
+      if (transferring) transferring = null;
+      else getCurrentWindow().hide();
+    }
   }
 
   onMount(() => {
-    Database.load("sqlite:daily-plan.db").then((loaded) => (db = loaded));
+    Database.load("sqlite:daily-plan.db").then(async (loaded) => {
+      db = loaded;
+      await loadYear();
+    });
+
+    // другие окна меняют данные — перечитываемся
+    const un = listen("tasks-changed", () => {
+      if (!db) return;
+      if (mode === "year") void loadYear();
+      else void loadMonth();
+    });
+    return () => void un.then((f) => f());
   });
 </script>
 
@@ -200,15 +269,53 @@
             class:transfer={t.source_id !== null}
             role="button"
             tabindex="0"
-            onclick={() => t.source_day && openDay(t.source_day)}
-            onkeydown={(e) => e.key === "Enter" && t.source_day && openDay(t.source_day)}
+            onclick={() => onRowClick(t)}
+            onkeydown={(e) => e.key === "Enter" && onRowClick(t)}
           >
             <span class="num">{t.position}.</span>
             <span class="text">{t.text}{t.truncated ? "…" : ""}</span>
-            {#if t.source_id !== null && t.source_day}
-              <span class="src">↗ {shortDayLabel(t.source_day)}</span>
-            {/if}
+            <span class="actions">
+              {#if t.source_id !== null && t.source_day}
+                <span class="src">↗ {shortDayLabel(t.source_day)}</span>
+              {/if}
+              <button
+                class="iconbtn"
+                class:lit={t.comments > 0}
+                title="Комментарии ({t.comments})"
+                aria-label="Комментарии: {t.comments}"
+                onclick={(e) => {
+                  e.stopPropagation();
+                  openTaskWindow(t.source_id ?? t.id);
+                }}
+              >💬&thinsp;<span class="count">{t.comments}</span></button>
+              {#if t.source_id === null && transferring?.id !== t.id}
+                <button
+                  class="iconbtn"
+                  title="Перенести в другой день"
+                  aria-label="Перенести"
+                  onclick={(e) => startTransfer(t, e)}
+                >↪</button>
+              {/if}
+            </span>
           </div>
+
+          {#if transferring?.id === t.id}
+            <div class="picker">
+              <span class="picker-label">Перенести в {cap(MONTHS_RU[month])}:</span>
+              {#each monthDays as md}
+                <button
+                  class="chip"
+                  class:current={md === t.day}
+                  disabled={md === t.day}
+                  style:background={heat(md)}
+                  onclick={() => doTransfer(md)}
+                >{Number(md.slice(-2))}</button>
+              {/each}
+              <button class="chip cancel" onclick={() => (transferring = null)}>
+                ✕
+              </button>
+            </div>
+          {/if}
         {/each}
       {/each}
       {#if db && rows.length === 0}
@@ -420,11 +527,90 @@
   }
 
   .src {
-    margin-left: auto;
     flex-shrink: 0;
     font-size: 11px;
     color: var(--accent);
     white-space: nowrap;
+  }
+
+  .actions {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-shrink: 0;
+  }
+
+  .iconbtn {
+    border: none;
+    background: none;
+    font-size: 11px;
+    line-height: 1;
+    color: var(--muted);
+    padding: 3px 6px;
+    border-radius: 9px;
+    cursor: pointer;
+    opacity: 0;
+    white-space: nowrap;
+  }
+
+  .task:hover .iconbtn,
+  .iconbtn.lit {
+    opacity: 1;
+  }
+
+  .iconbtn.lit {
+    color: var(--accent);
+  }
+
+  .iconbtn:hover {
+    background: var(--hover);
+    color: var(--accent);
+  }
+
+  .count {
+    font-variant-numeric: tabular-nums;
+  }
+
+  .picker {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 3px;
+    padding: 6px 8px 10px;
+  }
+
+  .picker-label {
+    width: 100%;
+    font-size: 11px;
+    color: var(--muted);
+    margin-bottom: 2px;
+  }
+
+  .chip {
+    min-width: 24px;
+    height: 24px;
+    border: none;
+    border-radius: 6px;
+    background: var(--hover);
+    color: var(--ink);
+    font-size: 11px;
+    cursor: pointer;
+  }
+
+  .chip:hover:not(:disabled) {
+    outline: 1.5px solid var(--accent);
+    outline-offset: -1.5px;
+  }
+
+  .chip:disabled,
+  .chip.current {
+    opacity: 0.35;
+    cursor: default;
+  }
+
+  .chip.cancel {
+    color: var(--muted);
   }
 
   .none {
