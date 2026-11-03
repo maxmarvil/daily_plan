@@ -2,6 +2,8 @@
   import { onMount } from "svelte";
   import Database from "@tauri-apps/plugin-sql";
   import { getCurrentWindow } from "@tauri-apps/api/window";
+  import { invoke } from "@tauri-apps/api/core";
+  import { todayStr } from "./lib/dates";
 
   type Task = {
     id: number;
@@ -11,11 +13,6 @@
     is_transfer: number;
     source_id: number | null;
   };
-
-  function todayStr(d: Date = new Date()): string {
-    const p = (n: number) => String(n).padStart(2, "0");
-    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
-  }
 
   let db: Database | null = $state(null);
   let tasks: Task[] = $state([]);
@@ -136,7 +133,25 @@
 <svelte:window onkeydown={onWindowKeydown} />
 
 <main class="capture">
-  <header class="day-label">{dateLabel}</header>
+  <header class="day-label">
+    <span>{dateLabel}</span>
+    <button
+      class="cal"
+      aria-label="Открыть календарь"
+      title="Календарь"
+      onclick={() => invoke("open_calendar")}
+    >
+      <svg viewBox="0 0 20 20" width="15" height="15" aria-hidden="true">
+        <path
+          d="M3 6A2 2 0 0 1 5 4h10a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2zM3 8h14M7 2.5V5M13 2.5V5"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.5"
+          stroke-linecap="round"
+        />
+      </svg>
+    </button>
+  </header>
 
   <section class="list">
     {#each tasks as task, i}
@@ -199,6 +214,9 @@
   }
 
   .day-label {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
     padding: 14px 18px 6px;
     font-size: 11px;
     font-weight: 600;
@@ -206,6 +224,21 @@
     text-transform: uppercase;
     color: var(--muted);
     flex-shrink: 0;
+  }
+
+  .cal {
+    border: none;
+    background: none;
+    padding: 4px;
+    border-radius: 6px;
+    color: var(--muted);
+    display: flex;
+    cursor: pointer;
+  }
+
+  .cal:hover {
+    background: var(--hover);
+    color: var(--accent);
   }
 
   .list {

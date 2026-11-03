@@ -73,6 +73,29 @@ fn toggle_capture_window(win: &WebviewWindow) {
     }
 }
 
+/// Показывает окно календаря, создавая его при первом вызове.
+#[tauri::command]
+fn open_calendar(app: tauri::AppHandle) -> tauri::Result<()> {
+    if let Some(win) = app.get_webview_window("calendar") {
+        win.show()?;
+        win.set_focus()?;
+        return Ok(());
+    }
+
+    let win = tauri::WebviewWindowBuilder::new(
+        &app,
+        "calendar",
+        tauri::WebviewUrl::App("index.html".into()),
+    )
+    .title("Календарь")
+    .inner_size(720.0, 760.0)
+    .min_inner_size(560.0, 600.0)
+    .center()
+    .build()?;
+    win.set_focus()?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let shortcuts =
@@ -107,6 +130,7 @@ pub fn run() {
             let _ = app;
             Ok(())
         })
+        .invoke_handler(tauri::generate_handler![open_calendar])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
