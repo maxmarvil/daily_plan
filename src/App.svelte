@@ -107,9 +107,24 @@
     }
   }
 
+  async function applyStoredShortcut(loaded: Database) {
+    try {
+      const stored = await loaded.select<{ value: string }[]>(
+        `SELECT value FROM settings WHERE key = 'capture_shortcut'`,
+      );
+      const want = stored[0]?.value;
+      if (want && want !== (await invoke<string>("get_shortcut"))) {
+        await invoke("set_shortcut", { shortcut: want });
+      }
+    } catch (e) {
+      console.error("Не удалось применить сохранённую комбинацию:", e);
+    }
+  }
+
   onMount(() => {
     Database.load("sqlite:daily-plan.db").then(async (loaded) => {
       db = loaded;
+      await applyStoredShortcut(loaded);
       await refresh();
     });
 
@@ -138,22 +153,40 @@
 <main class="capture">
   <header class="day-label">
     <span>{dateLabel}</span>
-    <button
-      class="cal"
-      aria-label="Открыть календарь"
-      title="Календарь"
-      onclick={() => invoke("open_calendar")}
-    >
-      <svg viewBox="0 0 20 20" width="15" height="15" aria-hidden="true">
-        <path
-          d="M3 6A2 2 0 0 1 5 4h10a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2zM3 8h14M7 2.5V5M13 2.5V5"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="1.5"
-          stroke-linecap="round"
-        />
-      </svg>
-    </button>
+    <span class="hdr-actions">
+      <button
+        class="cal"
+        aria-label="Настройки"
+        title="Настройки"
+        onclick={() => invoke("open_settings")}
+      >
+        <svg viewBox="0 0 20 20" width="15" height="15" aria-hidden="true">
+          <path
+            d="M10 12.6a2.6 2.6 0 1 0 0-5.2 2.6 2.6 0 0 0 0 5.2zM10 2.8l1.4 2.1h2.4l.6 2.4 2 1.4-1 2.2.7 2.4-2.3.8L12.5 18 10 16.9l-2.5 1.1-1.3-2-2.3-.8.7-2.4-1-2.2 2-1.4.6-2.4h2.4z"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.4"
+            stroke-linejoin="round"
+          />
+        </svg>
+      </button>
+      <button
+        class="cal"
+        aria-label="Открыть календарь"
+        title="Календарь"
+        onclick={() => invoke("open_calendar")}
+      >
+        <svg viewBox="0 0 20 20" width="15" height="15" aria-hidden="true">
+          <path
+            d="M3 6A2 2 0 0 1 5 4h10a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2zM3 8h14M7 2.5V5M13 2.5V5"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+          />
+        </svg>
+      </button>
+    </span>
   </header>
 
   <section class="list">
@@ -242,6 +275,11 @@
   .cal:hover {
     background: var(--hover);
     color: var(--accent);
+  }
+
+  .hdr-actions {
+    display: flex;
+    gap: 2px;
   }
 
   .list {
