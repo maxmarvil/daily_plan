@@ -1,5 +1,7 @@
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::tray::TrayIconBuilder;
 use tauri_plugin_global_shortcut::{
     Builder as ShortcutBuilder, GlobalShortcutExt, ShortcutState,
 };
@@ -206,6 +208,59 @@ fn open_task_window(app: tauri::AppHandle, task_id: i64) -> tauri::Result<()> {
     Ok(())
 }
 
+fn build_tray(app: &AppHandle) -> tauri::Result<()> {
+    let new_task = MenuItem::with_id(app, "new-task", "Новая задача", true, None::<&str>)?;
+    let calendar = MenuItem::with_id(app, "calendar", "Календарь", true, None::<&str>)?;
+    let settings = MenuItem::with_id(app, "settings", "Настройки", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "Выход", true, None::<&str>)?;
+
+    let menu = Menu::with_items(
+        app,
+        &[
+            &new_task,
+            &calendar,
+            &settings,
+            &PredefinedMenuItem::separator(app)?,
+            &quit,
+        ],
+    )?;
+
+    let icon = app
+        .default_window_icon()
+        .cloned()
+        .ok_or_else(|| {
+            tauri::Error::InvalidIcon(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "window icon not found",
+            ))
+        })?;
+
+    TrayIconBuilder::new()
+        .icon(icon)
+        .menu(&menu)
+        .show_menu_on_left_click(true)
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "new-task" => {
+                if let Some(win) = app.get_webview_window("main") {
+                    let _ = win.show();
+                    let _ = win.set_focus();
+                    let _ = app.emit("capture-shown", ());
+                }
+            }
+            "calendar" => {
+                let _ = open_calendar(app.clone());
+            }
+            "settings" => {
+                let _ = open_settings(app.clone());
+            }
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .build(app)?;
+
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     if let Err(e) = tauri::Builder::default()
@@ -238,9 +293,11 @@ pub fn run() {
                 .register(DEFAULT_SHORTCUT)
             {
                 eprintln!("не удалось зарегистрировать шорткат по умолчанию: {e}");
-                // fallback: показываем настройки, чтобы пользователь мог
-                // назначить другую комбинацию (главное окно стартует скрытым)
                 let _ = open_settings(app.handle().clone());
+            }
+
+            if let Err(e) = build_tray(app.handle()) {
+                eprintln!("не удалось создать tray-меню: {e}");
             }
             Ok(())
         })

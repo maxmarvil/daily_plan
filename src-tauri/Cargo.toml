@@ -12,7 +12,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2.7", features = [] }
 
 [dependencies]
-tauri = { version = "2.12", features = [] }
+tauri = { version = "2.12", features = ["tray-icon"] }
 tauri-plugin-global-shortcut = "2.4"
 tauri-plugin-sql = { version = "2.6", features = ["sqlite"] }
 serde = { version = "1", features = ["derive"] }
