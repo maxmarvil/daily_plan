@@ -6,14 +6,8 @@
   "permissions": [
     "core:default",
     "core:window:allow-hide",
-    "core:window:allow-show",
-    "core:window:allow-set-focus",
+    "core:window:allow-close",
     "sql:default",
-    "sql:allow-load",
-    "sql:allow-execute",
-    "sql:allow-select",
-    "sql:allow-close",
-    "global-shortcut:allow-register",
-    "global-shortcut:allow-unregister"
+    "sql:allow-execute"
   ]
 }

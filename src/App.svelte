@@ -1,27 +1,39 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { invoke } from "@tauri-apps/api/core";
   import { emit, listen } from "@tauri-apps/api/event";
   import { getDb } from "./lib/db";
-  import { todayStr } from "./lib/dates";
-
-  type Task = {
-    id: number;
-    day: string;
-    position: number;
-    text: string;
-    is_transfer: number;
-    source_id: number | null;
-  };
+  import {
+    insertTask,
+    loadDayTasks,
+    setTaskDone,
+    updateTaskText,
+    type TaskRow,
+  } from "./lib/tasks";
+  import {
+    SETTING_CAPTURE_SHORTCUT,
+    SETTING_NEW_TASK_SHORTCUT,
+    getSetting,
+  } from "./lib/settings";
+  import { combosEqual } from "./lib/shortcut";
+  import { shortDayLabel, todayStr } from "./lib/dates";
 
   let db = $state<Awaited<ReturnType<typeof getDb>> | null>(null);
-  let tasks: Task[] = $state([]);
+  let tasks: TaskRow[] = $state([]);
   let day = $state(todayStr());
 
   let adding = $state(false);
   let draft = $state("");
   let editing: { id: number; text: string } | null = $state(null);
+  let addEditor: HTMLTextAreaElement | null = $state(null);
+
+  let saving = $state(false);
+  let pendingDone: Set<number> = $state(new Set());
+  let error = $state("");
+
+  // защита от stale-ответов при быстрых переключениях/обновлениях
+  let loadTicket = 0;
 
   // автофокус для полей ввода
   function focus(el: HTMLTextAreaElement) {
@@ -31,34 +43,45 @@
 
   async function refresh() {
     if (!db) return;
-    tasks = await db.select<Task[]>(
-      `SELECT id, day, position, text, source_id, is_transfer
-       FROM tasks
-       WHERE day = $1
-       ORDER BY position`,
-      [day],
-    );
+    const ticket = ++loadTicket;
+    try {
+      const rows = await loadDayTasks(db, day);
+      if (ticket !== loadTicket) return;
+      tasks = rows;
+      error = "";
+    } catch (e) {
+      if (ticket !== loadTicket) return;
+      error = `Не удалось загрузить задачи: ${String(e)}`;
+    }
+  }
+
+  /** Смена суток (в т.ч. после сна, когда таймер мог не сработать). */
+  function syncDay(): boolean {
+    const today = todayStr();
+    if (today === day) return false;
+    day = today;
+    adding = false;
+    editing = null;
+    draft = "";
+    return true;
   }
 
   async function commitDraft() {
+    if (saving) return;
     const text = draft.trim();
     if (!db || !text) {
       adding = false;
       draft = "";
       return;
     }
+    saving = true;
+    // дата берётся на момент сохранения: не пишем во вчера после полуночи/сна
+    const targetDay = todayStr();
+    if (targetDay !== day) day = targetDay;
     try {
-      const now = new Date().toISOString();
-      const rowsAffected = await db.execute(
-        `INSERT INTO tasks (day, position, text, created_at, updated_at)
-         SELECT $1,
-                (SELECT COALESCE(MAX(position), 0) + 1 FROM tasks WHERE day = $1),
-                $2, $3, $3`,
-        [day, text, now],
-      );
-      if (rowsAffected === 0) {
-        // на всякий случай — не должно случиться при валидных данных
-        console.error("INSERT не вставил строку");
+      const affected = await insertTask(db, targetDay, text);
+      if (affected === 0) {
+        error = "Не удалось сохранить задачу";
         return;
       }
       adding = false;
@@ -67,31 +90,56 @@
       emit("tasks-changed");
     } catch (e) {
       // не теряем набранное: поле остаётся открытым
-      console.error("Не удалось сохранить задачу:", e);
+      error = `Не удалось сохранить задачу: ${String(e)}`;
+    } finally {
+      saving = false;
     }
   }
 
-  function startEdit(task: Task) {
-    // запись-перенос в текущем дне нельзя редактировать — открываем оригинал
-    if (task.is_transfer && task.source_id) {
-      invoke("open_task_window", { taskId: task.source_id });
+  function startEdit(task: TaskRow) {
+    if (task.source_id !== null) {
+      openTaskWindow(task);
       return;
     }
     editing = { id: task.id, text: task.text };
   }
 
   async function saveEdit() {
-    if (!db || !editing) return;
-    const text = editing.text.trim();
-    if (text) {
-      await db.execute(
-        `UPDATE tasks SET text = $1, updated_at = $2 WHERE id = $3`,
-        [text, new Date().toISOString(), editing.id],
-      );
+    if (!db || !editing || saving) return;
+    const current = editing;
+    const text = current.text.trim();
+    saving = true;
+    try {
+      if (text) await updateTaskText(db, current.id, text);
+      // сбрасываем только свой редактор: пользователь мог открыть другой
+      if (editing?.id === current.id) editing = null;
+      await refresh();
+      emit("tasks-changed");
+    } catch (e) {
+      error = `Не удалось сохранить задачу: ${String(e)}`;
+    } finally {
+      saving = false;
     }
-    editing = null;
-    await refresh();
-    emit("tasks-changed");
+  }
+
+  async function toggleDone(task: TaskRow) {
+    if (!db || pendingDone.has(task.id)) return;
+    pendingDone = new Set(pendingDone).add(task.id);
+    try {
+      await setTaskDone(db, task);
+      await refresh();
+      emit("tasks-changed");
+    } catch (e) {
+      error = `Не удалось изменить статус: ${String(e)}`;
+    } finally {
+      const next = new Set(pendingDone);
+      next.delete(task.id);
+      pendingDone = next;
+    }
+  }
+
+  function openTaskWindow(task: TaskRow) {
+    void invoke("open_task_window", { taskId: task.source_id ?? task.id });
   }
 
   function onInputKeydown(e: KeyboardEvent, commit: () => void) {
@@ -109,53 +157,103 @@
         editing = null;
         draft = "";
       } else {
-        getCurrentWindow().hide();
+        void getCurrentWindow().hide();
       }
     }
   }
 
-  async function applyStoredShortcut() {
-    try {
-      const loaded = await getDb();
-      const stored = await loaded.select<{ value: string }[]>(
-        `SELECT value FROM settings WHERE key = 'capture_shortcut'`,
-      );
-      const want = stored[0]?.value;
-      if (want && want !== (await invoke<string>("get_shortcut"))) {
-        await invoke("set_shortcut", { shortcut: want });
+  async function applyStoredShortcuts(loaded: NonNullable<typeof db>) {
+    const shortcuts: {
+      key: string;
+      read: string;
+      apply: string;
+    }[] = [
+      {
+        key: SETTING_CAPTURE_SHORTCUT,
+        read: "get_shortcut",
+        apply: "set_shortcut",
+      },
+      {
+        key: SETTING_NEW_TASK_SHORTCUT,
+        read: "get_new_task_shortcut",
+        apply: "set_new_task_shortcut",
+      },
+    ];
+    for (const shortcut of shortcuts) {
+      try {
+        const stored = await getSetting(loaded, shortcut.key);
+        if (!stored) continue;
+        const current = await invoke<string>(shortcut.read);
+        if (!combosEqual(stored, current)) {
+          await invoke(shortcut.apply, { shortcut: stored });
+        }
+      } catch (e) {
+        console.error("Не удалось применить сохранённую комбинацию:", e);
       }
+    }
+  }
+
+  /** Раз в день — консистентный снимок БД (VACUUM INTO корректно работает с WAL). */
+  async function ensureDailyBackup(loaded: NonNullable<typeof db>) {
+    try {
+      const path = await invoke<string | null>("prepare_backup", {
+        day: todayStr(),
+      });
+      if (!path) return;
+      await loaded.execute("VACUUM INTO $1", [path]);
+      await invoke("prune_backups", { keep: 7 });
     } catch (e) {
-      console.error("Не удалось применить сохранённую комбинацию:", e);
+      console.error("Не удалось создать бэкап БД:", e);
     }
   }
 
   onMount(() => {
-    getDb().then(async (loaded) => {
-      db = loaded;
-      await applyStoredShortcut();
+    let disposed = false;
+
+    getDb()
+      .then(async (loaded) => {
+        if (disposed) return;
+        db = loaded;
+        await applyStoredShortcuts(loaded);
+        await refresh();
+        void ensureDailyBackup(loaded);
+      })
+      .catch((e) => {
+        if (!disposed) error = `Не удалось открыть базу данных: ${String(e)}`;
+      });
+
+    const onShown = async () => {
+      if (!syncDay() && editing) {
+        // глобальный шорткат не присылает blur — сохраняем правку, а не теряем текст
+        await saveEdit();
+      }
+      if (!editing) {
+        adding = true;
+        await tick();
+        addEditor?.focus();
+      }
       await refresh();
-    });
+    };
 
     // при вызове окна по горячей клавише сразу даём поле ввода
-    const unlisten = listen("capture-shown", () => {
-      adding = true;
+    const unlistenCapture = listen("capture-shown", onShown);
+    const unlistenNewTask = listen("new-task-shortcut", onShown);
+    // изменения из календаря/окна задачи — обновляем список
+    const unlistenTasks = listen("tasks-changed", () => {
+      if (!disposed) void refresh();
     });
 
     // смена полуночи: если день изменился, переключаемся на новый
     const timer = setInterval(() => {
-      const t = todayStr();
-      if (t !== day) {
-        day = t;
-        adding = false;
-        editing = null;
-        draft = "";
-        refresh();
-      }
+      if (syncDay()) void refresh();
     }, 30_000);
 
     return () => {
+      disposed = true;
       clearInterval(timer);
-      void unlisten.then((f) => f());
+      void unlistenCapture.then((f) => f());
+      void unlistenNewTask.then((f) => f());
+      void unlistenTasks.then((f) => f());
     };
   });
 
@@ -180,9 +278,15 @@
         title="Настройки"
         onclick={() => invoke("open_settings")}
       >
-        <svg viewBox="0 0 20 20" width="15" height="15" aria-hidden="true">
+        <svg viewBox="0 0 20 20" width="30" height="30" aria-hidden="true">
           <path
-            d="M10 12.6a2.6 2.6 0 1 0 0-5.2 2.6 2.6 0 0 0 0 5.2zM10 2.8l1.4 2.1h2.4l.6 2.4 2 1.4-1 2.2.7 2.4-2.3.8L12.5 18 10 16.9l-2.5 1.1-1.3-2-2.3-.8.7-2.4-1-2.2 2-1.4.6-2.4h2.4z"
+            d="M10 7a3 3 0 1 0 0 6 3 3 0 0 0 0-6z"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.5"
+          />
+          <path
+            d="M16.9 11.2V8.8l-2.2-.3a6.2 6.2 0 0 0-.6-1.3l1.3-1.8-1.7-1.7-1.8 1.3a6.2 6.2 0 0 0-1.3-.6l-.3-2.2H8.2l-.3 2.2a6.2 6.2 0 0 0-1.3.6l-1.8-1.3-1.7 1.7 1.3 1.8a6.2 6.2 0 0 0-.6 1.3l-2.2.3v2.4l2.2.3c.1.5.3.9.6 1.3l-1.3 1.8 1.7 1.7 1.8-1.3c.4.3.8.5 1.3.6l.3 2.2h2.4l.3-2.2c.5-.1.9-.3 1.3-.6l1.8 1.3 1.7-1.7-1.3-1.8c.3-.4.5-.8.6-1.3l2.2-.3z"
             fill="none"
             stroke="currentColor"
             stroke-width="1.4"
@@ -196,7 +300,7 @@
         title="Календарь"
         onclick={() => invoke("open_calendar")}
       >
-        <svg viewBox="0 0 20 20" width="15" height="15" aria-hidden="true">
+        <svg viewBox="0 0 20 20" width="30" height="30" aria-hidden="true">
           <path
             d="M3 6A2 2 0 0 1 5 4h10a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2zM3 8h14M7 2.5V5M13 2.5V5"
             fill="none"
@@ -209,13 +313,18 @@
     </span>
   </header>
 
-  <section class="list">
-    {#each tasks as task, i}
+  {#if error}
+    <p class="banner" role="alert">{error}</p>
+  {/if}
+
+  <section class="list" aria-label="Задачи на сегодня">
+    {#each tasks as task (task.id)}
       {#if editing?.id === task.id}
         <textarea
           class="editor"
           use:focus
           rows="3"
+          aria-label="Редактирование задачи"
           bind:value={editing.text}
           onkeydown={(e) => onInputKeydown(e, saveEdit)}
           onblur={saveEdit}
@@ -223,23 +332,74 @@
       {:else}
         <div
           class="task"
-          class:transfer={task.is_transfer}
-          role="button"
-          tabindex="0"
-          onclick={() => startEdit(task)}
-          onkeydown={(e) => e.key === "Enter" && startEdit(task)}
+          class:transfer={task.source_id !== null}
+          class:done={task.is_done}
         >
-          <span class="num">{i + 1}.</span>
-          <span class="text">{task.text}</span>
+          <button
+            class="task-main"
+            title={task.source_id !== null
+              ? "Открыть оригинал задачи"
+              : "Редактировать задачу"}
+            onclick={() => startEdit(task)}
+          >
+            <span class="num">{task.position}.</span>
+            <span class="text">{task.text}{task.truncated ? "…" : ""}</span>
+          </button>
+          {#if task.source_id !== null && task.source_day}
+            <span class="src" title="Перенос из дня">
+              ↗ {shortDayLabel(task.source_day)}
+            </span>
+          {/if}
+          {#if task.transfers > 0}
+            <span
+              class="has-transfers"
+              title="У этой задачи есть переносы"
+              aria-label="У этой задачи есть переносы"
+            ></span>
+          {/if}
+          <span class="actions">
+            <button
+              class="iconbtn"
+              class:lit={task.comments > 0}
+              title="Комментарии ({task.comments})"
+              aria-label="Комментарии: {task.comments}"
+              onclick={(e) => {
+                e.stopPropagation();
+                openTaskWindow(task);
+              }}
+            >
+              💬{#if task.comments > 0}<span class="count">{task.comments}</span>{/if}
+            </button>
+            <button
+              class="done-btn"
+              class:done={task.is_done}
+              aria-label={task.is_done
+                ? "Вернуть в работу"
+                : "Отметить выполненной"}
+              title={task.is_done ? "Вернуть в работу" : "Отметить выполненной"}
+              onclick={(e) => {
+                e.stopPropagation();
+                void toggleDone(task);
+              }}
+            >
+              {task.is_done ? "↩" : "✓"}
+            </button>
+          </span>
         </div>
       {/if}
     {/each}
+
+    {#if !error && db && !adding && tasks.length === 0}
+      <p class="none">На сегодня задач нет</p>
+    {/if}
 
     {#if adding}
       <textarea
         class="editor new"
         use:focus
+        bind:this={addEditor}
         rows="3"
+        aria-label="Новая задача"
         placeholder="Новая задача…"
         bind:value={draft}
         onkeydown={(e) => onInputKeydown(e, commitDraft)}
@@ -303,6 +463,16 @@
     gap: 2px;
   }
 
+  .banner {
+    margin: 4px 12px 6px;
+    padding: 6px 10px;
+    border-radius: 7px;
+    background: color-mix(in srgb, #d24c3f 14%, var(--bg));
+    color: #d24c3f;
+    font-size: 12px;
+    line-height: 1.35;
+  }
+
   .list {
     flex: 1;
     overflow-y: auto;
@@ -311,18 +481,44 @@
 
   .task {
     display: flex;
+    align-items: center;
     gap: 8px;
     padding: 7px 8px;
     border-radius: 8px;
-    cursor: text;
+    box-shadow: inset 0 0 0 1.5px var(--accent);
+    margin-bottom: 5px;
   }
 
   .task.transfer {
     background: color-mix(in srgb, var(--accent) 16%, var(--bg));
   }
 
+  .task.done {
+    box-shadow: inset 0 0 0 1.5px var(--success, #34c759);
+  }
+
+  .task.done .text {
+    color: var(--muted);
+    text-decoration: line-through;
+  }
+
   .task:hover {
     background: var(--hover);
+  }
+
+  .task-main {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0;
+    border: none;
+    background: none;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
   }
 
   .num {
@@ -335,6 +531,99 @@
   .text {
     white-space: pre-wrap;
     word-break: break-word;
+    flex: 1;
+    user-select: text;
+  }
+
+  .src {
+    flex-shrink: 0;
+    font-size: 11px;
+    color: var(--accent);
+    white-space: nowrap;
+  }
+
+  .has-transfers {
+    flex-shrink: 0;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+    opacity: 0.75;
+  }
+
+  .actions {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .iconbtn {
+    border: none;
+    background: none;
+    font-size: 11px;
+    line-height: 1;
+    color: var(--muted);
+    padding: 3px 6px;
+    border-radius: 9px;
+    cursor: pointer;
+    opacity: 0;
+    white-space: nowrap;
+  }
+
+  .task:hover .iconbtn,
+  .iconbtn.lit,
+  .iconbtn:focus-visible {
+    opacity: 1;
+  }
+
+  .iconbtn.lit {
+    color: var(--accent);
+  }
+
+  .iconbtn:hover {
+    background: var(--hover);
+    color: var(--accent);
+  }
+
+  .count {
+    font-variant-numeric: tabular-nums;
+  }
+
+  .done-btn {
+    flex-shrink: 0;
+    width: 24px;
+    height: 24px;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--success, #34c759);
+    font-size: 14px;
+    line-height: 1;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    transition: opacity 0.12s ease;
+  }
+
+  .task:hover .done-btn,
+  .done-btn:focus-visible {
+    opacity: 1;
+  }
+
+  .done-btn:hover {
+    background: var(--hover);
+  }
+
+  .done-btn.done {
+    opacity: 1;
+    color: var(--muted);
+  }
+
+  .done-btn.done:hover {
+    color: var(--ink);
   }
 
   .editor {
@@ -353,23 +642,42 @@
   }
 
   .bar {
+    display: flex;
+    justify-content: center;
     padding: 6px 8px 10px;
   }
 
   .add {
-    width: 44px;
-    height: 44px;
+    --add-h: 45px;
+    width: calc(var(--add-h) * 4);
+    height: var(--add-h);
     border: none;
-    border-radius: 50%;
+    border-radius: 9999px;
     background: var(--accent);
     color: #fff;
-    font-size: 26px;
+    font-size: 24px;
     line-height: 1;
     cursor: pointer;
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+    display: flex;
+    align-items: center;
+    justify-content: center;
   }
 
-  .add:disabled {
-    opacity: 0.5;
+  .none {
+    margin: 18px 0 8px;
+    text-align: center;
+    color: var(--muted);
+    font-size: 13px;
+  }
+
+  .cal:focus-visible,
+  .task-main:focus-visible,
+  .iconbtn:focus-visible,
+  .done-btn:focus-visible,
+  .add:focus-visible,
+  .editor:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
   }
 </style>

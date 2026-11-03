@@ -1,8 +1,9 @@
 [package]
 name = "daily-plan"
-version = "0.1.0"
+version = "0.2.0"
 description = "Daily Plan — quick capture of tasks for the day"
 edition = "2021"
+rust-version = "1.90"
 
 [lib]
 name = "daily_plan_lib"
@@ -15,5 +16,5 @@ tauri-build = { version = "2.7", features = [] }
 tauri = { version = "2.12", features = ["tray-icon"] }
 tauri-plugin-global-shortcut = "2.4"
 tauri-plugin-sql = { version = "2.6", features = ["sqlite"] }
-serde = { version = "1", features = ["derive"] }
+# serde_json нужен tauri::generate_context! (макрос эмитит обращение к нему)
 serde_json = "1"

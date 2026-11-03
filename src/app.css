@@ -5,6 +5,7 @@
   --hover: rgba(0, 0, 0, 0.045);
   --editor-bg: #fff;
   --accent: #e8a33d; /* оранжевый Notes-акцент: переносы и кнопка «+» */
+  --success: #34c759; /* зелёный для выполненных задач */
 }
 
 @media (prefers-color-scheme: dark) {
@@ -15,6 +16,7 @@
     --hover: rgba(255, 255, 255, 0.06);
     --editor-bg: #262626;
     --accent: #d98e2b;
+    --success: #30d158;
   }
 }
 

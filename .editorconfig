@@ -1,0 +1,22 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+indent_style = space
+indent_size = 2
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.rs]
+indent_size = 4
+
+[*.{ts,svelte,js,mjs,cjs,json,jsonc,css,html,yml,yaml}]
+indent_size = 2
+
+[*.md]
+# в Markdown два пробела в конце строки — жёсткий перенос
+trim_trailing_whitespace = false
+
+[Makefile]
+indent_style = tab

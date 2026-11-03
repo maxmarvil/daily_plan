@@ -1,50 +1,58 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { getCurrentWindow } from "@tauri-apps/api/window";
-  import { emit } from "@tauri-apps/api/event";
+  import { emit, listen } from "@tauri-apps/api/event";
   import { getDb } from "./lib/db";
   import { dayLabel } from "./lib/dates";
+  import {
+    insertComment,
+    loadComments,
+    loadRawTask,
+  } from "./lib/tasks";
 
-  type Task = { id: number; day: string; text: string; source_id: number | null };
+  type RawTask = {
+    id: number;
+    day: string;
+    text: string;
+    source_id: number | null;
+    is_done: number;
+  };
   type Comment = { id: number; text: string; created_at: string };
 
   const label = getCurrentWindow().label;
   const windowTaskId = Number(label.slice("task-".length));
 
   let db = $state<Awaited<ReturnType<typeof getDb>> | null>(null);
-  let task = $state<Task | null>(null);
+  let task = $state<RawTask | null>(null);
   let originalMissing = $state(false);
   let comments = $state<Comment[]>([]);
   let draft = $state("");
+  let saving = $state(false);
+  let error = $state("");
+  let composer: HTMLTextAreaElement | null = $state(null);
 
   async function loadAll() {
     if (!db) return;
-    let rows = await db.select<Task[]>(
-      `SELECT id, day, text, source_id FROM tasks WHERE id = $1`,
-      [windowTaskId],
-    );
-    let t = rows[0] ?? null;
-    if (t?.source_id != null) {
-      rows = await db.select<Task[]>(
-        `SELECT id, day, text, source_id FROM tasks WHERE id = $1`,
-        [t.source_id],
-      );
-      if (!rows[0]) {
-        originalMissing = true;
-        task = null;
-        comments = [];
-        return;
+    try {
+      const own = await loadRawTask(db, windowTaskId);
+      let resolved = own;
+      if (own?.source_id != null) {
+        resolved = await loadRawTask(db, own.source_id);
+        if (!resolved) {
+          originalMissing = true;
+          task = null;
+          comments = [];
+          error = "";
+          return;
+        }
       }
-      t = rows[0];
+      originalMissing = false;
+      task = resolved;
+      comments = resolved ? await loadComments(db, resolved.id) : [];
+      error = "";
+    } catch (e) {
+      error = `Не удалось загрузить задачу: ${String(e)}`;
     }
-    task = t;
-    comments = t
-      ? await db.select<Comment[]>(
-          `SELECT id, text, created_at FROM comments
-           WHERE task_id = $1 ORDER BY created_at`,
-          [t.id],
-        )
-      : [];
   }
 
   function timeOf(iso: string): string {
@@ -57,18 +65,23 @@
   }
 
   async function submitComment() {
+    if (saving) return;
     const text = draft.trim();
     if (!db || !task || !text) {
       draft = "";
       return;
     }
-    await db.execute(
-      `INSERT INTO comments (task_id, text, created_at) VALUES ($1, $2, $3)`,
-      [task.id, text, new Date().toISOString()],
-    );
-    draft = "";
-    await loadAll();
-    emit("tasks-changed");
+    saving = true;
+    try {
+      await insertComment(db, task.id, text);
+      draft = "";
+      await loadAll();
+      emit("tasks-changed");
+    } catch (e) {
+      error = `Не удалось добавить комментарий: ${String(e)}`;
+    } finally {
+      saving = false;
+    }
   }
 
   function onDraftKeydown(e: KeyboardEvent) {
@@ -79,7 +92,7 @@
   }
 
   function onWindowKeydown(e: KeyboardEvent) {
-    if (e.key === "Escape") getCurrentWindow().hide();
+    if (e.key === "Escape") void getCurrentWindow().close();
   }
 
   function focus(el: HTMLTextAreaElement) {
@@ -87,26 +100,49 @@
   }
 
   onMount(() => {
-    getDb().then(async (loaded) => {
-      db = loaded;
-      await loadAll();
+    getDb()
+      .then(async (loaded) => {
+        db = loaded;
+        await loadAll();
+      })
+      .catch((e) => {
+        error = `Не удалось открыть базу данных: ${String(e)}`;
+      });
+
+    const unlistenTasks = listen("tasks-changed", () => {
+      void loadAll();
     });
+
+    const focusComposer = () => composer?.focus();
+    window.addEventListener("focus", focusComposer);
+
+    return () => {
+      window.removeEventListener("focus", focusComposer);
+      void unlistenTasks.then((f) => f());
+    };
   });
 </script>
 
 <svelte:window onkeydown={onWindowKeydown} />
 
 <main class="viewer">
+  {#if error}
+    <p class="banner" role="alert">{error}</p>
+  {/if}
+
   {#if originalMissing}
     <p class="none">Оригинал задачи не найден</p>
   {:else if task}
     <header class="head">
       <div class="date">{dayLabel(task.day)}</div>
+      {#if task.is_done}
+        <span class="done">выполнена</span>
+      {/if}
     </header>
 
     <article class="task-text">{task.text}</article>
 
-    <section class="feed">
+    <section class="feed" aria-label="Комментарии">
       {#each comments as c}
         <div class="comment">
           <div class="when">{timeOf(c.created_at)}</div>
@@ -125,7 +161,9 @@
     <footer class="composer">
       <textarea
         use:focus
+        bind:this={composer}
         rows="2"
+        aria-label="Новый комментарий"
         placeholder="Комментарий… (Enter — отправить, Shift+Enter — перенос)"
         bind:value={draft}
         onkeydown={onDraftKeydown}
@@ -146,7 +184,21 @@
     background: var(--bg);
   }
 
+  .banner {
+    margin: 10px 14px 0;
+    padding: 6px 10px;
+    border-radius: 7px;
+    background: color-mix(in srgb, #d24c3f 14%, var(--bg));
+    color: #d24c3f;
+    font-size: 12px;
+    line-height: 1.35;
+  }
+
   .head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
     padding: 14px 18px 4px;
     flex-shrink: 0;
   }
@@ -157,6 +209,14 @@
     letter-spacing: 0.04em;
     text-transform: uppercase;
     color: var(--muted);
+  }
+
+  .done {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--success, #34c759);
   }
 
   .task-text {

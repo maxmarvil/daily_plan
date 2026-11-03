@@ -2,7 +2,10 @@ import { describe, it, expect } from "vitest";
 import {
   DEFAULT_SHORTCUT,
   comboFromEvent,
+  combosEqual,
   formatCombo,
+  formatComboParts,
+  normalizeCombo,
 } from "./shortcut";
 
 function key(
@@ -72,12 +75,58 @@ describe("comboFromEvent", () => {
   });
 });
 
-describe("formatCombo", () => {
-  it("renders mac symbols", () => {
-    expect(formatCombo("Command+Shift+D")).toBe("⌘⇧D");
+describe("normalizeCombo", () => {
+  it("normalizes the Rust display form to the UI form", () => {
+    // Shortcut::to_string() из global-hotkey на macOS
+    expect(normalizeCombo("shift+super+KeyD", true)).toBe("Command+Shift+D");
+    expect(normalizeCombo("shift+alt+KeyN", true)).toBe("Alt+Shift+N");
   });
 
-  it("renders default shortcut", () => {
-    expect(formatCombo(DEFAULT_SHORTCUT)).toBe("⌘/⌃⇧D");
+  it("expands CmdOrCtrl per platform", () => {
+    expect(normalizeCombo(DEFAULT_SHORTCUT, true)).toBe("Command+Shift+D");
+    expect(normalizeCombo(DEFAULT_SHORTCUT, false)).toBe("Control+Shift+D");
+  });
+
+  it("keeps modifier order stable", () => {
+    expect(normalizeCombo("Shift+Alt+Command+D", true)).toBe(
+      "Command+Alt+Shift+D",
+    );
+  });
+
+  it("maps arrow and punctuation aliases", () => {
+    expect(normalizeCombo("Command+ArrowUp", true)).toBe("Command+Up");
+    expect(normalizeCombo("Command+Up", true)).toBe("Command+Up");
+    expect(normalizeCombo("Command+Comma", true)).toBe("Command+,");
+  });
+});
+
+describe("combosEqual", () => {
+  it("treats Rust and UI forms as equal", () => {
+    expect(combosEqual("shift+super+KeyD", DEFAULT_SHORTCUT, true)).toBe(true);
+  });
+
+  it("detects different combinations", () => {
+    expect(combosEqual("shift+super+KeyD", "shift+super+KeyN", true)).toBe(false);
+  });
+});
+
+describe("formatCombo", () => {
+  it("renders mac symbols separated", () => {
+    expect(formatCombo("Command+Shift+D", true)).toBe("⌘ ⇧ D");
+  });
+
+  it("renders default shortcut for mac", () => {
+    expect(formatCombo(DEFAULT_SHORTCUT, true)).toBe("⌘ ⇧ D");
+  });
+
+  it("renders Rust display form", () => {
+    expect(formatCombo("shift+super+KeyD", true)).toBe("⌘ ⇧ D");
+  });
+});
+
+describe("formatComboParts", () => {
+  it("returns separate chips", () => {
+    expect(formatComboParts("Command+Shift+D", true)).toEqual(["⌘", "⇧", "D"]);
+    expect(formatComboParts("shift+alt+KeyN", true)).toEqual(["⌥", "⇧", "N"]);
   });
 });
