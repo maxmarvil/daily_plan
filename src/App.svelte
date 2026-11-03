@@ -1,0 +1,270 @@
+<script lang="ts">
+  import { onMount } from "svelte";
+  import Database from "@tauri-apps/plugin-sql";
+  import { getCurrentWindow } from "@tauri-apps/api/window";
+
+  type Task = {
+    id: number;
+    day: string;
+    position: number;
+    text: string;
+    is_transfer: number;
+    source_id: number | null;
+  };
+
+  function todayStr(d: Date = new Date()): string {
+    const p = (n: number) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  }
+
+  let db: Database | null = $state(null);
+  let tasks: Task[] = $state([]);
+  let day = $state(todayStr());
+
+  let adding = $state(false);
+  let draft = $state("");
+  let editing: { id: number; text: string } | null = $state(null);
+
+  // автофокус для полей ввода
+  function focus(el: HTMLTextAreaElement) {
+    el.focus();
+    el.setSelectionRange(el.value.length, el.value.length);
+  }
+
+  async function refresh() {
+    if (!db) return;
+    tasks = await db.select<Task[]>(
+      `SELECT id, day, position, text, source_id, is_transfer
+       FROM tasks
+       WHERE day = $1
+       ORDER BY position`,
+      [day],
+    );
+  }
+
+  async function commitDraft() {
+    const text = draft.trim();
+    adding = false;
+    draft = "";
+    if (!db || !text) return;
+    const rows = await db.select<{ max: number | null }[]>(
+      `SELECT MAX(position) AS max FROM tasks WHERE day = $1`,
+      [day],
+    );
+    const position = (rows[0]?.max ?? 0) + 1;
+    const now = new Date().toISOString();
+    await db.execute(
+      `INSERT INTO tasks (day, position, text, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $4)`,
+      [day, position, text, now],
+    );
+    await refresh();
+  }
+
+  function startEdit(task: Task) {
+    editing = { id: task.id, text: task.text };
+  }
+
+  async function saveEdit() {
+    if (!db || !editing) return;
+    const text = editing.text.trim();
+    if (text) {
+      await db.execute(
+        `UPDATE tasks SET text = $1, updated_at = $2 WHERE id = $3`,
+        [text, new Date().toISOString(), editing.id],
+      );
+    }
+    editing = null;
+    await refresh();
+  }
+
+  function onInputKeydown(e: KeyboardEvent, commit: () => void) {
+    // Enter — зафиксировать, Shift+Enter — перевод строки
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      commit();
+    }
+  }
+
+  function onWindowKeydown(e: KeyboardEvent) {
+    if (e.key === "Escape") {
+      if (adding || editing) {
+        adding = false;
+        editing = null;
+        draft = "";
+      } else {
+        getCurrentWindow().hide();
+      }
+    }
+  }
+
+  onMount(() => {
+    Database.load("sqlite:daily-plan.db").then(async (loaded) => {
+      db = loaded;
+      await refresh();
+    });
+
+    // смена полуночи: если день изменился, переключаемся на новый
+    const timer = setInterval(() => {
+      const t = todayStr();
+      if (t !== day) {
+        day = t;
+        refresh();
+      }
+    }, 30_000);
+    return () => clearInterval(timer);
+  });
+
+  const dateLabel = $derived(
+    new Date(`${day}T12:00:00`).toLocaleDateString("ru-RU", {
+      day: "numeric",
+      month: "long",
+      weekday: "short",
+    }),
+  );
+</script>
+
+<svelte:window onkeydown={onWindowKeydown} />
+
+<main class="capture">
+  <header class="day-label">{dateLabel}</header>
+
+  <section class="list">
+    {#each tasks as task, i}
+      {#if editing?.id === task.id}
+        <textarea
+          class="editor"
+          use:focus
+          rows="3"
+          bind:value={editing.text}
+          onkeydown={(e) => onInputKeydown(e, saveEdit)}
+          onblur={saveEdit}
+        ></textarea>
+      {:else}
+        <div
+          class="task"
+          role="button"
+          tabindex="0"
+          onclick={() => startEdit(task)}
+          onkeydown={(e) => e.key === "Enter" && startEdit(task)}
+        >
+          <span class="num">{i + 1}.</span>
+          <span class="text">{task.text}</span>
+        </div>
+      {/if}
+    {/each}
+
+    {#if adding}
+      <textarea
+        class="editor new"
+        use:focus
+        rows="3"
+        placeholder="Новая задача…"
+        bind:value={draft}
+        onkeydown={(e) => onInputKeydown(e, commitDraft)}
+        onblur={commitDraft}
+      ></textarea>
+    {/if}
+  </section>
+
+  <footer class="bar">
+    <button
+      class="add"
+      aria-label="Добавить задачу"
+      onclick={() => (adding = true)}
+      disabled={adding}
+    >+</button>
+  </footer>
+</main>
+
+<style>
+  .capture {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    font-family:
+      -apple-system, "SF Pro Text", "Helvetica Neue", sans-serif;
+    font-size: 15px;
+    line-height: 1.45;
+    color: var(--ink);
+    background: var(--bg);
+  }
+
+  .day-label {
+    padding: 14px 18px 6px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--muted);
+    flex-shrink: 0;
+  }
+
+  .list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 4px 10px;
+  }
+
+  .task {
+    display: flex;
+    gap: 8px;
+    padding: 7px 8px;
+    border-radius: 8px;
+    cursor: text;
+  }
+
+  .task:hover {
+    background: var(--hover);
+  }
+
+  .num {
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+    user-select: none;
+    flex-shrink: 0;
+  }
+
+  .text {
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .editor {
+    width: 100%;
+    margin: 4px 0;
+    padding: 8px 10px;
+    border: none;
+    border-radius: 8px;
+    background: var(--editor-bg);
+    color: var(--ink);
+    font: inherit;
+    resize: vertical;
+    outline: none;
+    box-shadow: 0 0 0 1.5px var(--accent);
+  }
+
+  .bar {
+    display: flex;
+    justify-content: flex-end;
+    padding: 10px 16px 14px;
+    flex-shrink: 0;
+  }
+
+  .add {
+    width: 44px;
+    height: 44px;
+    border: none;
+    border-radius: 50%;
+    background: var(--accent);
+    color: #fff;
+    font-size: 26px;
+    line-height: 1;
+    cursor: pointer;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+  }
+
+  .add:disabled {
+    opacity: 0.5;
+  }
+</style>

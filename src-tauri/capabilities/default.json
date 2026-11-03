@@ -1,0 +1,13 @@
+{
+  "$schema": "https://schema.tauri.app/config/2/capability",
+  "identifier": "default",
+  "description": "Основное окно quick-capture и окна просмотра задач",
+  "windows": ["main", "task-*"],
+  "permissions": [
+    "core:default",
+    "opener:default",
+    "sql:default",
+    "global-shortcut:allow-register",
+    "global-shortcut:allow-unregister"
+  ]
+}

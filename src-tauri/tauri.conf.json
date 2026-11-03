@@ -1,0 +1,41 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Daily Plan",
+  "version": "0.1.0",
+  "identifier": "app.dailyplan.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Daily Plan",
+        "width": 420,
+        "height": 520,
+        "minWidth": 320,
+        "minHeight": 360,
+        "center": true,
+        "alwaysOnTop": true,
+        "resizable": true,
+        "visible": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": []
+  },
+  "plugins": {
+    "sql": {
+      "preload": ["sqlite:daily-plan.db"]
+    }
+  }
+}

@@ -1,0 +1,30 @@
+:root {
+  --bg: #fdfdfc;
+  --ink: #1f1e1d;
+  --muted: #9c9a97;
+  --hover: rgba(0, 0, 0, 0.045);
+  --editor-bg: #fff;
+  --accent: #e8a33d; /* оранжевый Notes-акцент: переносы и кнопка «+» */
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1e1e1e;
+    --ink: #eceae7;
+    --muted: #7b7976;
+    --hover: rgba(255, 255, 255, 0.06);
+    --editor-bg: #262626;
+    --accent: #d98e2b;
+  }
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--bg);
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
