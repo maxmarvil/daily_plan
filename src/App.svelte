@@ -44,21 +44,30 @@
 
   async function commitDraft() {
     const text = draft.trim();
-    adding = false;
-    draft = "";
-    if (!db || !text) return;
-    const rows = await db.select<{ max: number | null }[]>(
-      `SELECT MAX(position) AS max FROM tasks WHERE day = $1`,
-      [day],
-    );
-    const position = (rows[0]?.max ?? 0) + 1;
-    const now = new Date().toISOString();
-    await db.execute(
-      `INSERT INTO tasks (day, position, text, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $4)`,
-      [day, position, text, now],
-    );
-    await refresh();
+    if (!db || !text) {
+      adding = false;
+      draft = "";
+      return;
+    }
+    try {
+      const rows = await db.select<{ max: number | null }[]>(
+        `SELECT MAX(position) AS max FROM tasks WHERE day = $1`,
+        [day],
+      );
+      const position = (rows[0]?.max ?? 0) + 1;
+      const now = new Date().toISOString();
+      await db.execute(
+        `INSERT INTO tasks (day, position, text, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [day, position, text, now, now],
+      );
+      adding = false;
+      draft = "";
+      await refresh();
+    } catch (e) {
+      // не теряем набранное: поле остаётся открытым
+      console.error("Не удалось сохранить задачу:", e);
+    }
   }
 
   function startEdit(task: Task) {
@@ -164,17 +173,16 @@
         onkeydown={(e) => onInputKeydown(e, commitDraft)}
         onblur={commitDraft}
       ></textarea>
+    {:else}
+      <div class="bar">
+        <button
+          class="add"
+          aria-label="Добавить задачу"
+          onclick={() => (adding = true)}
+        >+</button>
+      </div>
     {/if}
   </section>
-
-  <footer class="bar">
-    <button
-      class="add"
-      aria-label="Добавить задачу"
-      onclick={() => (adding = true)}
-      disabled={adding}
-    >+</button>
-  </footer>
 </main>
 
 <style>
@@ -231,6 +239,7 @@
   }
 
   .editor {
+    box-sizing: border-box;
     width: 100%;
     margin: 4px 0;
     padding: 8px 10px;
@@ -245,10 +254,7 @@
   }
 
   .bar {
-    display: flex;
-    justify-content: flex-end;
-    padding: 10px 16px 14px;
-    flex-shrink: 0;
+    padding: 6px 8px 10px;
   }
 
   .add {
